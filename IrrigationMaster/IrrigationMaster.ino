@@ -26,6 +26,7 @@ const unsigned long FILTER_FLUSH_REST_TIME  = 86400000;
 // 5 seconds to flush
 const unsigned long FILTER_FLUSH_TIME = 5000;
 const unsigned long FLOW_TIME = 30000;
+const unsigned long PRIME_TIME = 30000;
 
 // set the LCD address to 0x27 for a 16 chars and 2 line display
 LiquidCrystal_PCF8574 lcd(0x27);  
@@ -37,11 +38,13 @@ unsigned long rainRestStart;
 unsigned long flushRestStart = 0;
 unsigned long filterFlushStart;
 unsigned long flowStart;
+unsigned long primeStart;
 unsigned long prevPressureTime = 0;
 
 bool isOverrun = false;
+bool isPrimeFail = false;
 bool isFlowZero = false;
-bool isWellResting = false;
+bool primeFailedWell = false;
 
 bool isRainRestTimerActive = false;
 bool isWaterLevelTimerActive = false;
@@ -49,13 +52,16 @@ bool isPressureTimerActive = false;
 bool isFlushRestTimerActive = true;
 bool isFlushingTimerActive = false;
 bool isFlowTimerActive = false;
+bool isPrimeTimerActive = false;
 
 // Flow is zero but water level is above minimum
-bool flowDistanceMismatch = false;
-byte distanceToWaterMismatch = 255;
+bool primeFailedRain = false;
+byte distanceToWaterPrimeFailed = 255;
 // Save the current pump pin 255 is undefined pin and pumps should be off
 byte currentPump = 255;
+
 short prevPressure = 255;
+
 void setup() {
   // put your setup code here, to run once:
   //Serial.begin(9600);
@@ -110,10 +116,7 @@ void loop() {
   // if pump on
   if (currentPump != 255) {
     if (pressure >= HIGH_PRESSURE || (currentPump == RAIN_PUMP_PIN && distanceToWater >= DISTANCE_TO_BOTTOM_TANK)) {
-      printToLcd("Shut down", "");
-      printPump(currentPump);
       shutDownPumps();
-      delay(1000);
     }
   }
   // Pump is off. If pressure is low turn on pump  
@@ -123,7 +126,7 @@ void loop() {
       if (distanceToWater >= MAX_WATER_DISTANCE) {
         isRainRestTimerActive = true;
         rainRestStart = millis();
-        if (!isWellResting) {
+        if (!primeFailedWell) {
           currentPump = WELL_PUMP_PIN;
         } 
       }
@@ -131,7 +134,7 @@ void loop() {
         currentPump = RAIN_PUMP_PIN;
       }
     }
-    else if (!isWellResting) {
+    else if (!primeFailedWell) {
       currentPump = WELL_PUMP_PIN;
     } 
     if(currentPump != 255) {
@@ -160,47 +163,54 @@ void loop() {
   }
   // failsafes if the pumps are still on
   if (currentPump != 255 || areAnyPumpsOn()) {
-      isOverrun = hasTimeRunOut(pumpStart, OVERRUN_TIME);
-      if (isOverrun) {
-        // num of hours times length of hour in ms (24 hours)
-        const unsigned long REST_TIME = (3.6e+6 * 24);
-        printToLcd("Overran", "");
-        printPump(currentPump);
-        shutDownPumps();
-        // shutdown for rest time
-        delay(REST_TIME);
+    if (pressure <= LOW_PRESSURE) {
+      isPrimeFail = hasPrimeFailed();
+    }
+    if (isPrimeFail) {
+      if (currentPump == RAIN_PUMP_PIN) {
+        primeFailedRain = isPrimeFail;
+        distanceToWaterPrimeFailed = distanceToWater; 
+        isRainRestTimerActive = true;
+        rainRestStart = millis();
       }
-      isFlowZero = isNoFlow();
-      if (isFlowZero) {    
-        if(!isRainRestTimerActive && currentPump == RAIN_PUMP_PIN && distanceToWater < DISTANCE_TO_BOTTOM_TANK) {
-          flowDistanceMismatch = true;
-          distanceToWaterMismatch = distanceToWater;
-          isRainRestTimerActive = true;
-          rainRestStart = millis();
-        }
-        else if(currentPump == WELL_PUMP_PIN) {
-          isWellResting = true;
-        }
-        shutDownPumps();    
+      else if (currentPump == WELL_PUMP_PIN) {
+        primeFailedWell = true;
       }
+      shutDownPumps();
+    }
+    isFlowZero = isNoFlow();
+    if (isFlowZero) {    
+      shutDownPumps();    
+    }
+    isOverrun = hasTimeRunOut(pumpStart, OVERRUN_TIME);
+    if (isOverrun) {
+      // num of hours times length of hour in ms (24 hours)
+      const unsigned long REST_TIME = (3.6e+6 * 24);
+      printToLcd("Overran", "");
+      printPump(currentPump);
+      shutDownPumps();
+      // shutdown for rest time
+      delay(REST_TIME);
+    }
   }
-  if(flowDistanceMismatch) {
-    printToLcd("Error flow/wtr", " level mismatch");
-    delay(1000);
-    byte waterLevel = (DISTANCE_TO_BOTTOM_TANK - distanceToWaterMismatch);
-    printToLcd("Water level: ", waterLevel);
-    delay(1000);
+
+  if(primeFailedRain) {
+    printToLcd("Prime fail", "rain pump");
+    delay(2000);
+    byte waterLevel = (DISTANCE_TO_BOTTOM_TANK - distanceToWaterPrimeFailed);
+    printToLcd("at water lvl ", waterLevel);
+    delay(4000);
   }
-  if(isWellResting) {
-    printToLcd("Error no flow", "from well pump");
-    delay(1000);
+  if(primeFailedWell) {
+    printToLcd("Prime fail", "well pump");
+    delay(4000);
   }
   if (isRainRestTimerActive) {
     printToLcd("Rain pump rest", "t: ");
     unsigned long timeRemain = (timeRemaining(rainRestStart, RAIN_REST_TIME) / 1000 / 60);
     lcd.print(timeRemain);
     lcd.print(" min");
-    delay(1000);
+    delay(1500);
     isRainRestTimerActive = (timeRemain > 0);
   }
   if (isFlushRestTimerActive) {
@@ -208,7 +218,7 @@ void loop() {
     unsigned long timeRemain = (timeRemaining(flushRestStart, FILTER_FLUSH_REST_TIME) / 1000 / 60);
     lcd.print(timeRemain);
     lcd.print(" min");
-    delay(1000);
+    delay(1500);
     isFlushRestTimerActive = (timeRemain > 0);
   }
 }
@@ -289,37 +299,69 @@ bool hasTimeRunOut(unsigned long startTime, unsigned long duration) {
   }
   return false;
 }
+bool hasPrimeFailed() {
+  if (isPrimeTimerActive) {
+    return hasTimeRunOut(primeStart, PRIME_TIME);
+  }
+  else {
+    isPrimeTimerActive = true;
+    primeStart = millis();
+    return false;
+  }
+}
+double flowSum = 0; // Sum of flow values
+int flowCount = 0;  // Count of flow measurements
+
 bool isNoFlow() {
   byte currPressure = getPressure();
   unsigned long currPressureTime = millis();
   double deltaTime = ((double)timeElapsed(prevPressureTime, currPressureTime) / 1000.0 / 60.0);
   double deltaP = (currPressure - prevPressure);
-  double flow = deltaP / deltaTime; // Change in pressure per minute
+  double currFlow = deltaP / deltaTime; // Change in pressure per minute
+  // Calculate and check average flow
+  double avgFlow = flowSum / flowCount;
+  // Update the flow sum and count
+  flowSum += currFlow;
+  flowCount++;
+  
+  // Display current values
   printToLcd("Prev Pressure", prevPressure);
   delay(1000);
   printToLcd("Curr Pressure", currPressure);
   delay(1000);
-  printToLcd("Flow: ", "");
-  lcd.print(flow);
-  delay(1000);
+  printToLcd("avgFlow: ", "");
+  lcd.print(avgFlow);
+  delay(2000);
+  
   prevPressure = currPressure;
   prevPressureTime = currPressureTime;
 
-  if (flow <= 0) {
+  if (currFlow <= 0) {
     if (isFlowTimerActive) {
-      return hasTimeRunOut(flowStart, FLOW_TIME);
-    }
-    else {
+      // Check if the flow timer has run out
+      if (hasTimeRunOut(flowStart, FLOW_TIME)) {
+        isFlowTimerActive = false; // Reset the timer
+        if (avgFlow <= 0) {
+          // Reset flow sum and count for next period
+          flowSum = 0;
+          flowCount = 0;
+          return true;
+        }
+      }
+      return false;
+    } else {
+      // Start the flow timer
       isFlowTimerActive = true;
       flowStart = millis();
       return false;
     }
-  }
-  else {
+  } else {
+    // Reset the flow timer if there is flow
     isFlowTimerActive = false;
     return false;
   }
 }
+
 // override is to turn off fliter flush immediately /
 // Return true if filter flush is done
 bool filterFlush(bool override) {
@@ -363,10 +405,17 @@ byte CANreceive(int id) {
 }
 // return false if errror occurs trying to shut down the specified pin
 void shutDownPumps() {
+  printToLcd("Shut down", "");
+  printPump(currentPump);
   digitalWrite(WELL_PUMP_PIN, HIGH);
   digitalWrite(RAIN_PUMP_PIN, HIGH);
   currentPump = 255;
   isFlowTimerActive = false;
+  flowSum = 0;
+  flowCount = 0;
+  isPrimeTimerActive = false;
+  isPrimeFail = false;
+  delay(1000);
 }
 void printPump(byte pumpPin) {
   if(pumpPin == RAIN_PUMP_PIN) {
