@@ -14,7 +14,8 @@ const byte LOW_PRESSURE = 20;
 // 40 PSI  
 const byte HIGH_PRESSURE = 40;
 // Measured as distance from water to the top of tank. Measured in decimeters
-const byte DISTANCE_TO_BOTTOM_TANK = 21; 
+const byte DISTANCE_TO_BOTTOM_TANK = 21;
+const byte MAX_WATER_DISTANCE = 18;
 
 // if the water level is low or the flow was 0 do not retry for 3 hr 
 const unsigned long RAIN_REST_TIME = 10800000;
@@ -112,13 +113,14 @@ void loop() {
       printToLcd("Shut down", "");
       printPump(currentPump);
       shutDownPumps();
+      delay(1000);
     }
   }
   // Pump is off. If pressure is low turn on pump  
   else if (pressure <= LOW_PRESSURE) {
     if (!isRainRestTimerActive) {
       // if water level is too low set rain rest to true
-      if (distanceToWater >= DISTANCE_TO_BOTTOM_TANK) {
+      if (distanceToWater >= MAX_WATER_DISTANCE) {
         isRainRestTimerActive = true;
         rainRestStart = millis();
         if (!isWellResting) {
@@ -194,20 +196,20 @@ void loop() {
     delay(1000);
   }
   if (isRainRestTimerActive) {
-    printToLcd("Rain pump rest", " t: ");
+    printToLcd("Rain pump rest", "t: ");
     unsigned long timeRemain = (timeRemaining(rainRestStart, RAIN_REST_TIME) / 1000 / 60);
     lcd.print(timeRemain);
     lcd.print(" min");
     delay(1000);
-    isRainRestTimerActive = timeRemain == 0;
+    isRainRestTimerActive = (timeRemain > 0);
   }
   if (isFlushRestTimerActive) {
-    printToLcd("Filter rest", " t: ");
+    printToLcd("Filter rest", "t: ");
     unsigned long timeRemain = (timeRemaining(flushRestStart, FILTER_FLUSH_REST_TIME) / 1000 / 60);
     lcd.print(timeRemain);
     lcd.print(" min");
     delay(1000);
-    isFlushRestTimerActive = timeRemain == 0;
+    isFlushRestTimerActive = (timeRemain > 0);
   }
 }
 byte getPressure(){
@@ -288,9 +290,18 @@ bool hasTimeRunOut(unsigned long startTime, unsigned long duration) {
   return false;
 }
 bool isNoFlow() {
-  short currPressure = (short)getPressure();
+  byte currPressure = getPressure();
   unsigned long currPressureTime = millis();
-  short flow = (currPressure - prevPressure) / timeElapsed(prevPressureTime, currPressureTime);
+  double deltaTime = ((double)timeElapsed(prevPressureTime, currPressureTime) / 1000.0 / 60.0);
+  double deltaP = (currPressure - prevPressure);
+  double flow = deltaP / deltaTime; // Change in pressure per minute
+  printToLcd("Prev Pressure", prevPressure);
+  delay(1000);
+  printToLcd("Curr Pressure", currPressure);
+  delay(1000);
+  printToLcd("Flow: ", "");
+  lcd.print(flow);
+  delay(1000);
   prevPressure = currPressure;
   prevPressureTime = currPressureTime;
 
@@ -315,7 +326,7 @@ bool filterFlush(bool override) {
   // Send id for pressure
   const int FILTER_ID = 0x7;
   if(!isFlushingTimerActive) {
-    if(override) {
+    if (override) {
       return true;
     }
     lcd.clear();
@@ -355,6 +366,7 @@ void shutDownPumps() {
   digitalWrite(WELL_PUMP_PIN, HIGH);
   digitalWrite(RAIN_PUMP_PIN, HIGH);
   currentPump = 255;
+  isFlowTimerActive = false;
 }
 void printPump(byte pumpPin) {
   if(pumpPin == RAIN_PUMP_PIN) {
