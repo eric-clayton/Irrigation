@@ -15,10 +15,10 @@ const int FILTER_ID = 0x7;
 // Analog pins
 // Water pressure sensor analog pin A7
 const byte WATER_PRESSURE_PIN_A = A7;
-// Water level echo analog pin A6
-const byte WATER_LEVEL_ECHO_PIN_A = A6;
-// Water level trig analog pin A5
-const byte WATER_LEVEL_TRIG_PIN_A = A5;
+// Water level echo analog pin D8
+const byte WATER_LEVEL_ECHO_PIN_D = 8;
+// Water level trig analog pin D9
+const byte WATER_LEVEL_TRIG_PIN_D = 9;
 
 // Digital pins
 // CAN communication board failure digital pin 5
@@ -32,9 +32,9 @@ void setup() {
   // Connect filter relay as output
   pinMode(FILTER_RELAY_PIN_D, OUTPUT);
   // Sets the trig Pin as an OUTPUT
-  pinMode(WATER_LEVEL_TRIG_PIN_A, OUTPUT);
+  pinMode(WATER_LEVEL_TRIG_PIN_D, OUTPUT);
   // Sets the echo Pin as an INPUT
-  pinMode(WATER_LEVEL_ECHO_PIN_A, INPUT); 
+  pinMode(WATER_LEVEL_ECHO_PIN_D, INPUT); 
   
   digitalWrite(FILTER_RELAY_PIN_D, HIGH);
 
@@ -78,14 +78,14 @@ byte getPressure(){
 }
 byte getWaterLevel() {
   // Clears the trig Pin condition
-  digitalWrite(WATER_LEVEL_TRIG_PIN_A, LOW);
+  digitalWrite(WATER_LEVEL_TRIG_PIN_D, LOW);
   delayMicroseconds(2);
   // Sets the trig Pin HIGH (ACTIVE) for 10 microseconds
-  digitalWrite(WATER_LEVEL_TRIG_PIN_A, HIGH);
+  digitalWrite(WATER_LEVEL_TRIG_PIN_D, HIGH);
   delayMicroseconds(10);
-  digitalWrite(WATER_LEVEL_TRIG_PIN_A, LOW);
+  digitalWrite(WATER_LEVEL_TRIG_PIN_D, LOW);
   // Reads the echo Pin, returns the sound wave travel time in microseconds
-  long duration = pulseIn(WATER_LEVEL_ECHO_PIN_A, HIGH);
+  long duration = pulseIn(WATER_LEVEL_ECHO_PIN_D, HIGH);
   // Calculating the distance
   int distance = duration * 0.00343 / 2; // Speed of sound wave divided by 2 (go and back) decimeters
   return (byte)distance;
