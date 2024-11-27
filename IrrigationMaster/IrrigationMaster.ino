@@ -23,7 +23,7 @@ const byte LOW_PRESSURE = 20;
 // 40 PSI  
 const byte HIGH_PRESSURE = 40;
 // Measured as distance from water to the top of tank. Measured in decimeters
-const byte DISTANCE_TO_BOTTOM_TANK = 21;
+const byte DISTANCE_TO_BOTTOM_TANK = 23;
 const byte MAX_WATER_DISTANCE = 18;
 
 // if the water level is low or the flow was 0 do not retry for 3 hr 
