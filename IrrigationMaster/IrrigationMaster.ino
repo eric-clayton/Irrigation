@@ -2,6 +2,8 @@
 #include <Wire.h>
 #include <LiquidCrystal_PCF8574.h>
 
+
+
 #define CURRENTPUMP 0
 #define PRESSURE 1
 #define WATERLEVEL 2
@@ -22,9 +24,8 @@ const byte WELL_PUMP_PIN = 4;
 const byte LOW_PRESSURE = 20;
 // 40 PSI  
 const byte HIGH_PRESSURE = 40;
-// Measured as distance from water to the top of tank. Measured in decimeters
-const byte DISTANCE_TO_BOTTOM_TANK = 23;
-const byte MAX_WATER_DISTANCE = 18;
+
+const byte MIN_WATER_LEVEL_PERCENTAGE = 10;
 
 // if the water level is low or the flow was 0 do not retry for 3 hr 
 const unsigned long RAIN_REST_TIME = 10800000;
@@ -35,7 +36,7 @@ const unsigned long FILTER_REST_TIME  = 86400000;
 // 5 seconds to flush
 const unsigned long FILTER_TIME = 5000;
 const unsigned long FLOW_TIME = 30000;
-const unsigned long PRIME_TIME = 30000;
+const unsigned long PRIME_TIME = 60000;
 const unsigned long DISPLAY_TIME = 2000;
 const byte MAX_MESSAGES = 9;
 // set the LCD address to 0x27 for a 16 chars and 2 line display
@@ -44,63 +45,61 @@ LiquidCrystal_PCF8574 lcd(0x27);
 //CAN BUS connections: CS > D10, SO > D12, SI > D11, SCK > D13,  INT > D2
 
 // Errors
-bool isOverrun = false;
-bool isPrimeFail = false;
 bool isFlowZero = false;
 bool primeFailedWell = false;
 // Flow is zero but water level is above minimum
 bool primeFailedRain = false;
-bool displayShutDown = false;
-byte distanceToWaterPrimeFailed = 255;
+byte waterLevelPrimeFailed = 255;
+
+bool stopPumpMessageFlag = false;
+bool startPumpMessageFlag = false;
+bool flowZeroMessageFlag = false; 
+bool startFilterMessageFlag = false;
+bool stopFilterMessageFlag = false;
+
 // Save the current pump pin 255 is undefined pin and pumps should be off
 byte currentPump = 255;
+byte shutDownPump = 255;
 byte pressure;
-byte distanceToWater;
-byte flow;
+byte waterLevelPercentage;
+short flow;
 
 short prevPressure = 255;
-byte messageIndex = MAX_MESSAGES;
+byte messageIndex = 0;
 
 class Timer {
   unsigned long duration;
   unsigned long startTime;
-  bool endMessageFlag = false;
-  bool startMessageFlag = false;
-  bool active;
-  void stopTimer() {
-    endMessageFlag = true;
-    active = false;
-  }
+  bool active = false;
+  void (*onEnd)() = nullptr;
+  void (*onStart)() = nullptr;
   public:
-  Timer(bool active, unsigned long duration) {
-    if (active) {
-      startTimer();
-    }
-    this->active = active;
+  Timer(unsigned long duration) {
     this->duration = duration;
+  }
+  unsigned long getStartTime() {
+    return startTime;
   }
   bool isActive() {
     return active;
   }
-  bool getEndMessageFlag() {
-    return endMessageFlag;
-  }
-  void resetEndMessageFlag() {
-    this->endMessageFlag = false;
-  }
-  bool getStartMessageFlag() {
-    return startMessageFlag;
-  }
-  void resetStartMessageFlag() {
-    this->startMessageFlag = false;
-  }
-  void startTimer() {
-    startMessageFlag = true;
+  void start() {
+    if(active)
+    {
+      return;
+    }
     active = true;
+    if(onStart)
+      onStart();
     startTime = millis();
   }
-
-  void cancelTimer() {
+  void end() {
+    active = false;
+    if (onEnd) {
+      onEnd();
+    }
+  }
+  void cancel() {
     active = false;
   }
   double timeRemainingHr() {
@@ -116,6 +115,8 @@ class Timer {
     }
   }
   unsigned long timeElapsed() {
+    if (!isActive())
+      return 0;
     // unsigned long max value;
     const unsigned long MAX_ULONG = 0xFFFFFFFF;
     unsigned long currTime = millis();
@@ -129,67 +130,33 @@ class Timer {
     }
   }
   void update() {
-    if (active)
-      if (hasTimerRunOut()) 
-        stopTimer();
+    if (active && timeElapsed() >= duration)
+      end();  
   }
-  bool updateConditional(bool shouldTimerBeOn) {
-    if (shouldTimerBeOn) {
-      if (active) {
-        if (hasTimerRunOut()) {
-          stopTimer();
-          return true;
-        }
-      }
-      else {
-        startTimer();
-        return false;
-      }
-    }
-    else {
-      if (active) {
-        cancelTimer();
-      }
-      return false;
-    }
+  attachOnEnd(void (*callback)()) {
+    onEnd = callback;
   }
-  bool updateContinuous() {
-      if (active) {
-        if (hasTimerRunOut()) {
-          stopTimer();
-          startTimer();
-          return true;
-        }
-      }
-      else {
-        startTimer();
-        return false;
-      }
+  attachOnStart(void (*callback)()) {
+    onStart = callback;
   }
-  // returns if timer has run over duration
-  bool hasTimerRunOut() {
-    if(!active) {
-      return false;
-    }
-    if (timeElapsed() >= duration) {
-      return true;
-    }
-    return false;
-  }
-
 };
 // Setup timers
-Timer primeTimer(false, PRIME_TIME);
-Timer rainRestTimer(false, RAIN_REST_TIME);
-Timer overrunTimer(false, OVERRUN_TIME);
-Timer messageTimer(true, DISPLAY_TIME);
-Timer oneMessageTimer(true, DISPLAY_TIME);
-Timer flowTimer(false, FLOW_TIME);
-Timer filterActiveTimer(false, FILTER_TIME);
-Timer filterRestTimer(false, FILTER_REST_TIME);
+Timer primeTimer(PRIME_TIME);
+Timer rainRestTimer(RAIN_REST_TIME);
+Timer overrunTimer(OVERRUN_TIME);
+Timer messageTimer(DISPLAY_TIME);
+Timer interruptMessageTimer(DISPLAY_TIME);
+Timer flowTimer(FLOW_TIME);
+Timer filterActiveTimer(FILTER_TIME);
+Timer filterRestTimer(FILTER_REST_TIME);
 void setup() {
-  // put your setup code here, to run once:
   //Serial.begin(9600);
+  // Attach timer functions
+  overrunTimer.attachOnEnd(pumpOverran);
+  primeTimer.attachOnEnd(primeFailed);
+  flowTimer.attachOnEnd(zeroFlow);
+  filterActiveTimer.attachOnStart(startFilterFlush);
+  filterActiveTimer.attachOnEnd(endFilterFlush);
   lcd.begin(16, 2); // initialize the lcd
   delay(1000);
   lcd.setBacklight(255);
@@ -219,33 +186,35 @@ void setup() {
   digitalWrite(RAIN_PUMP_PIN, HIGH);
   digitalWrite(WELL_PUMP_PIN, HIGH);
   prevPressure = getPressure();
-  distanceToWater = getDistanceToWater();
+  waterLevelPercentage = getWaterLevelPercentage();
   delay(1000);
   printToLcd("Setup complete", "Starting program");
   delay(1000);
 }
-
 void loop() {
-  displayMessageOnce();
-  if (!oneMessageTimer.isActive()) {
+  displayInterruptMessage();
+  if (!interruptMessageTimer.isActive()) {
     displayMessage();
   }
   pressure = getPressure();
 
-  byte distanceToWater = distanceToWater = getDistanceToWater();
+  waterLevelPercentage = getWaterLevelPercentage();
 
   // if pump on
   if (currentPump != 255) {
-    if (pressure >= HIGH_PRESSURE || (currentPump == RAIN_PUMP_PIN && distanceToWater >= DISTANCE_TO_BOTTOM_TANK)) {
+    if(pressure > LOW_PRESSURE) {
+      primeTimer.cancel();
+    }
+    if (pressure >= HIGH_PRESSURE || (currentPump == RAIN_PUMP_PIN && waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE)) {
       shutDownPumps();
     }
   }
   // Pump is off. If pressure is low turn on pump  
   else if (pressure <= LOW_PRESSURE) {
-    if (rainRestTimer.isActive()) {
+    if (!rainRestTimer.isActive()) {
       // if water level is too low set rain rest to true
-      if (distanceToWater >= MAX_WATER_DISTANCE) {
-        rainRestTimer.startTimer();
+      if (waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE) {
+        rainRestTimer.start();
         if (!primeFailedWell) {
           currentPump = WELL_PUMP_PIN;
         } 
@@ -258,114 +227,128 @@ void loop() {
       currentPump = WELL_PUMP_PIN;
     } 
     if(currentPump != 255) {
-      // if the filter is flushing turn it off before turning on the pump
-      if (filterActiveTimer.isActive()) {
-        filterFlush(true); // override set to true to immediately turn off filter flush
-        filterRestTimer.startTimer();
-      }
-      digitalWrite(currentPump, LOW);
-      overrunTimer.startTimer();
+      startPump();
     }
   }
   // Pump is off. If filter flush is not resting start flushing
   else {
     // if rest is over start flush
     if (!filterRestTimer.isActive()) {
-      if (filterFlush(false)) {
-        filterRestTimer.startTimer();
-      } // override is off so we dont end the flush early
+      filterActiveTimer.start();
     }
   }
   // failsafes if the pumps are still on
   if (currentPump != 255 || areAnyPumpsOn()) {
-    isPrimeFail = primeTimer.updateConditional(pressure <= LOW_PRESSURE);
-    if (isPrimeFail) {
-      if (currentPump == RAIN_PUMP_PIN) {
-        primeFailedRain = isPrimeFail;
-        distanceToWaterPrimeFailed = distanceToWater; 
-        rainRestTimer.startTimer();
-      }
-      else if (currentPump == WELL_PUMP_PIN) {
-        primeFailedWell = true;
-      }
-      shutDownPumps();
+    byte currPressure = pressure;
+    flow = currPressure - prevPressure;
+    prevPressure = currPressure;
+    if(flow <= 0) {
+      flowTimer.start();
     }
-    isFlowZero = isNoFlow();
-    if (isFlowZero) {    
-      shutDownPumps();    
+    else {
+      flowTimer.cancel();
     }
-    isOverrun = overrunTimer.updateConditional(currentPump != 255);
-    if (isOverrun) {
-      // num of hours times length of hour in ms (24 hours)
-      const unsigned long REST_TIME = (3.6e+6 * 24);
-      printToLcd("Overran", "");
-      printPump(currentPump);
-      shutDownPumps();
-      // shutdown for rest time
-      delay(REST_TIME);
-    }
-
   }
+  updateTimers();
+
+}
+void zeroFlow() { 
+  flowZeroMessageFlag = true;
+  shutDownPumps();    
+}
+void primeFailed() {
+  if (currentPump == RAIN_PUMP_PIN) {
+    primeFailedRain = true;
+    waterLevelPrimeFailed = waterLevelPercentage; 
+    rainRestTimer.start();
+  }
+  else if (currentPump == WELL_PUMP_PIN) {
+    primeFailedWell = true;
+  }
+  shutDownPumps();
+}
+void pumpOverran() {
+  // num of hours times length of hour in ms (24 hours)
+  const unsigned long REST_TIME = (3.6e+6 * 24);
+  printToLcd("Overran", "");
+  printPump(currentPump);
+  shutDownPumps();
+  // shutdown for rest time
+  delay(REST_TIME);
+}
+void updateTimers() {
+  primeTimer.update();
+  overrunTimer.update();
+  messageTimer.update();
+  interruptMessageTimer.update();
+  flowTimer.update();
+  filterActiveTimer.update();
   rainRestTimer.update();
   filterRestTimer.update();
 }
-byte getPressure(){
-  const unsigned long GET_PRESSURE_TIME = 6000;
+byte getPressure() {
   const int PRESSURE_ID = 0x2;
-  byte pressure = 255;
-  Timer pressureTimer(false, GET_PRESSURE_TIME);
-  do {
-    pressure = CANreceive(PRESSURE_ID);
+  byte waterPressure = 255;
+  waterPressure = CANreceive(PRESSURE_ID);
     
-    if(pressure != 255) {
-      return pressure;
-    }
-    else if (pressureTimer.updateConditional(pressure == 255)) {
-      shutDownPumps();
-      printToLcd("Read timeout", "pressure");
-      while(1);
-    }
-  } while (pressure == 255);
-}
-byte getDistanceToWater() {
-  const unsigned long GET_DISTANCE_TIME = 6000;
-  const int DISTANCE_TO_WATER_ID = 0x3;
-  byte distanceToWater = 255;
-  Timer distanceToWaterTimer(false, GET_DISTANCE_TIME);
-  do {
-    distanceToWater = CANreceive(DISTANCE_TO_WATER_ID);
-
-    if (distanceToWater != 255) {
-      return distanceToWater;
-    }
-    else if (distanceToWaterTimer.updateConditional(distanceToWater == 255)) {
-      shutDownPumps();
-      printToLcd("Read timeout", "Water level");
-      while(1);
-    }
-  } while (distanceToWater == 255);
-}
-
-bool isNoFlow() {
-  byte currPressure = getPressure();
-  byte flow = currPressure - prevPressure;
-  prevPressure = currPressure;
-  return flowTimer.updateConditional(flow <= 1);
-}
-
-// override is to turn off fliter flush immediately /
-// Return true if filter flush is done
-bool filterFlush(bool override) {
-  // Send id for pressure
-  const int FILTER_ID = 0x7;
-  if (filterActiveTimer.updateConditional(true) || override) {
-    CANsend(FILTER_ID, 0);
-    return true;
+  if (waterPressure != 255) {
+    return waterPressure;
   }
   else {
-    CANsend(FILTER_ID, 1);
-    return false;
+    return waitForReading(PRESSURE_ID, getPressureFailed);
   }
+}
+
+byte getWaterLevelPercentage() {
+  const int WATER_LEVEL_PERCENTAGE_ID = 0x3;
+  byte waterLevelPercentage = 255;
+  waterLevelPercentage = CANreceive(WATER_LEVEL_PERCENTAGE_ID);
+
+  if (waterLevelPercentage != 255) {
+    return waterLevelPercentage;
+  }
+  else {
+    return waitForReading(WATER_LEVEL_PERCENTAGE_ID, getWaterLevelFailed);
+  }
+}
+byte waitForReading(const int id, void (*getReadingFailed)()) {
+    const unsigned long GET_READING_TIME = 6000;
+    byte value;
+
+    Timer getReadingTimer(GET_READING_TIME);
+    getReadingTimer.start();
+
+    getReadingTimer.attachOnEnd(getReadingFailed);
+    do {
+        value = CANreceive(id);
+
+        if (value != 255) {
+          return value;
+        }
+        
+        getReadingTimer.update();
+    } while (value == 255);
+}
+void getPressureFailed() {
+  shutDownPumps();
+  printToLcd("Read timeout", "pressure");
+  while(1);
+}
+void getWaterLevelFailed() {
+  shutDownPumps();
+  printToLcd("Read timeout", "water level");
+  while(1);
+}
+void startFilterFlush() {
+  const int FILTER_ID = 0x7;
+  startFilterMessageFlag = true;
+  CANsend(FILTER_ID, 0);
+}
+void endFilterFlush() {
+  const int FILTER_ID = 0x7;
+  stopFilterMessageFlag = true;
+  CANsend(FILTER_ID, 1);
+  filterRestTimer.start();
 }
 void CANsend(int id, byte val){
   CAN.beginPacket(id);
@@ -383,15 +366,26 @@ byte CANreceive(int id) {
   }
   return 255;
 }
-// return false if errror occurs trying to shut down the specified pin
+void startPump() {
+    // if the filter is flushing turn it off before turning on the pump
+  if (filterActiveTimer.isActive()) {
+    delay(1000);
+    filterActiveTimer.end();
+  }
+  startPumpMessageFlag = true;
+  digitalWrite(currentPump, LOW);
+  overrunTimer.start();
+  primeTimer.start();
+}
 void shutDownPumps() {
-  displayShutDown = true;
-
+  stopPumpMessageFlag = true;
+  shutDownPump = currentPump;
   digitalWrite(WELL_PUMP_PIN, HIGH);
   digitalWrite(RAIN_PUMP_PIN, HIGH);
   currentPump = 255;
-  flowTimer.cancelTimer(); 
-  primeTimer.cancelTimer();
+  flowTimer.cancel();
+  overrunTimer.cancel();
+  primeTimer.cancel();
 }
 void printPump(byte pumpPin) {
   if(pumpPin == RAIN_PUMP_PIN) {
@@ -416,93 +410,156 @@ void printToLcd(const char* line1, byte val) {
   lcd.setCursor(0, 1);
   lcd.print(val);
 }
+void printToLcd(const char* line1, short val) {
+  lcd.clear();
+  lcd.print(line1);
+  lcd.setCursor(0, 1);
+  lcd.print(val);
+}
+void printToLcd(const char* line1, unsigned long val) {
+  lcd.clear();
+  lcd.print(line1);
+  lcd.setCursor(0, 1);
+  lcd.print(val);
+}
 bool areAnyPumpsOn(){
   bool wellPumpOn = digitalRead(WELL_PUMP_PIN) == LOW;
   bool rainPumpOn = digitalRead(RAIN_PUMP_PIN) == LOW;
   return wellPumpOn || rainPumpOn;
 }
-void displayMessageOnce() {
-  if (oneMessageTimer.hasTimerRunOut()) {
-    if (flowTimer.getEndMessageFlag()) {
-      printToLcd("Flow zero", "");
-      flowTimer.resetEndMessageFlag();
-      oneMessageTimer.startTimer();
+void displayInterruptMessage() {
+  if (interruptMessageTimer.isActive() || (!flowZeroMessageFlag && !stopPumpMessageFlag && !startPumpMessageFlag && !startFilterMessageFlag && !stopFilterMessageFlag)) {
+    return;
+  }
+  else {
+    if (flowZeroMessageFlag) {
+      printToLcd("Flow is Zero", "");
+      flowZeroMessageFlag = false;
     }
-    else if (displayShutDown) {
-      printToLcd("Shut down", "");
-      printPump(currentPump);
-      displayShutDown = false;
-      oneMessageTimer.startTimer();
+    else if (stopPumpMessageFlag) {
+      printToLcd("Shut down: ", "");
+      printPump(shutDownPump);
+      stopPumpMessageFlag = false;
     }
-    else if (overrunTimer.getStartMessageFlag()) {
-      printToLcd("Starting ", "");
+    else if (startPumpMessageFlag) {
+      printToLcd("Start pump: ", "");
       printPump(currentPump);
-      overrunTimer.resetStartMessageFlag();
-      oneMessageTimer.startTimer();
+      startPumpMessageFlag = false;
+    }
+    else if (startFilterMessageFlag) {
+      printToLcd("Filter flushing", "");
+      startFilterMessageFlag = false;
+    }
+    else if (stopFilterMessageFlag) {
+      printToLcd("Filter flush", "ended");
+      stopFilterMessageFlag = false;
     }
   }
+  interruptMessageTimer.start();
 }
 void displayMessage() {
-  if (messageTimer.updateContinuous()) {
+  if(messageTimer.isActive()) {
+    return;
+  }
+  bool skipMessage;
+  do {
+    skipMessage = false;
+    switch (messageIndex) {
+      case CURRENTPUMP:
+        displayCurrentPump();
+        break;
+      case PRESSURE:
+        displayPressure();
+        break;
+      case WATERLEVEL:
+        displayWaterLevel();
+        break;
+      case FLOW:
+        displayFlow();
+        break;
+      case PRIME_RAIN_FAIL:
+        if (primeFailedRain)
+          displayPrimeRainFail();
+        else
+          skipMessage = true;
+        break;
+      case PRIME_RAIN_FAIL_WATERLEVEL:
+        if (primeFailedRain)
+          displayPrimeRainFailWaterLevel();
+        else
+          skipMessage = true;
+        break;
+      case PRIME_WELL_FAILED:
+        if (primeFailedWell)
+          displayPrimeWellFailed();
+        else
+          skipMessage = true;
+        break;
+      case RAIN_TIMER:
+        if (rainRestTimer.isActive())
+          displayRainTimer();
+        else
+          skipMessage = true;
+        break;
+      case FILTER_TIMER:
+        if (filterRestTimer.isActive())
+          displayFilterTimer();
+        else
+          skipMessage = true;
+        break;
+    }
     messageIndex++;
-    if (messageIndex > MAX_MESSAGES) {
+    if (messageIndex >= MAX_MESSAGES)
       messageIndex = 0;
-  }
-    bool skipMessage;
-    do {
-      skipMessage = false;
-      switch(messageIndex) {
-        case CURRENTPUMP:
-          printToLcd("Current pump: ", "");
-          printPump(currentPump);
-          break;
-        case PRESSURE:
-          printToLcd("Pressure: ", pressure);
-          break;
-        case WATERLEVEL:
-          printToLcd("Water level: ", "");
-          lcd.print((DISTANCE_TO_BOTTOM_TANK - distanceToWater));
-          break;
-        case FLOW:
-          printToLcd("Flow: ", flow);
-          break;
-        case PRIME_RAIN_FAIL:
-          if (skipMsg(!primeFailedRain, skipMessage))
-            break;
-          printToLcd("Prime fail", "rain pump");
-          break;
-        case PRIME_RAIN_FAIL_WATERLEVEL:
-          if (skipMsg(!primeFailedRain, skipMessage))
-            break;
-          byte waterLevel = (DISTANCE_TO_BOTTOM_TANK - distanceToWaterPrimeFailed);
-          printToLcd("at water lvl ", waterLevel);
-          break;
-        case PRIME_WELL_FAILED:
-          if (skipMsg(!primeFailedWell, skipMessage))
-            break;
-          printToLcd("Prime fail", "well pump");
-          break;
-        case RAIN_TIMER:
-          if (skipMsg(!rainRestTimer.isActive(), skipMessage))
-            break;
-          printToLcd("Rain pump rest", "t: ");
-          lcd.print(rainRestTimer.timeRemainingHr());
-          lcd.print(" hr");
-          break;
-        case FILTER_TIMER:
-          if (skipMsg(!filterRestTimer.isActive(), skipMessage))
-            break;
-          printToLcd("Filter flush rest", "t: ");
-          lcd.print(filterRestTimer.timeRemainingHr());
-          lcd.print(" hr");
-          break;
-      }
-    } while (skipMessage);
-  }
+  } while (skipMessage);
+  messageTimer.start();
 }
-bool skipMsg(bool shouldSkip, bool &skipMessage) {
+
+void displayCurrentPump() {
+    printToLcd("Current pump: ", "");
+    printPump(currentPump);
+}
+
+void displayPressure() {
+    printToLcd("Pressure: ", pressure);
+}
+
+void displayWaterLevel() {
+    printToLcd("Water Tank: ", "");
+    lcd.print(waterLevelPercentage);
+    lcd.print("% full");
+}
+
+void displayFlow() {
+    printToLcd("Flow: ", flow);
+}
+
+void displayPrimeRainFail() {
+    printToLcd("Prime fail", "rain pump");
+}
+
+void displayPrimeRainFailWaterLevel() {
+    printToLcd("at water %", waterLevelPrimeFailed);
+}
+
+void displayPrimeWellFailed() {
+    printToLcd("Prime fail", "well pump");
+}
+
+void displayRainTimer() {
+    printToLcd("Rain pump rest", "t: ");
+    lcd.print(rainRestTimer.timeRemainingHr());
+    lcd.print(" hr");
+}
+
+void displayFilterTimer() {
+    printToLcd("Filtr flush rest", "t: ");
+    lcd.print(filterRestTimer.timeRemainingHr());
+    lcd.print(" hr");
+}
+
+bool updateSkipMessage(bool shouldSkip, bool &skipMessage) {
   if(shouldSkip) {
-    messageIndex++; 
     skipMessage = true;
     return true;
   }
