@@ -1,7 +1,7 @@
 #include <CAN.h>
 #include <NewPing.h>
 //CAN BUS connections: CS > D10, SO > D12, SI > D11, SCK > D13,  INT > D2
-#define MAX_DISTANCE 270
+#define MAX_DISTANCE 293
 // Error Codes for CAN communication failure CAN light will blink for each interval listed
 // The intialize CAN failed 1s
 const short INITIALIZE_ERROR_INTERVAL = 1000;
@@ -98,9 +98,9 @@ byte getWaterLevel() {
   Serial.print(distance);
   Serial.println(" cm");
   Serial.print("Tank is ");
-  Serial.print(map(distance, 0, MAX_DISTANCE, 100, 0));
+  Serial.print(map(distance, 18, MAX_DISTANCE, 100, 0));
   Serial.println("% full");
-  return map(distance, 0, MAX_DISTANCE, 100, 0);
+  return map(distance, 18, MAX_DISTANCE, 100, 0);
 }
 
 void CANsend (int id, byte val) {
