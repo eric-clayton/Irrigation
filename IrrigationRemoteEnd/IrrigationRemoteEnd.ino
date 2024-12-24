@@ -28,7 +28,6 @@ const byte COM_ERROR_PIN_D = 5;
 const byte FILTER_RELAY_PIN_D = 6;
 NewPing sonar(WATER_LEVEL_TRIG_PIN_D, WATER_LEVEL_ECHO_PIN_D, MAX_DISTANCE);
 void setup() {
-  Serial.begin(9600);
   // Connect can communication error as output
   pinMode(COM_ERROR_PIN_D, OUTPUT);
   // Connect filter relay as output
@@ -47,7 +46,6 @@ void setup() {
   }
   else {
     // Initialize CAN is good
-    Serial.println("Light on");
     digitalWrite(COM_ERROR_PIN_D, HIGH);
   }
 }
@@ -75,31 +73,13 @@ byte getPressure(){
     counter++;
   }
   int pressureReading = pressureTotal / NUM_OF_READS; // Average pressure reading
-
   // Map the voltage reading to psi
   byte pressure = map(pressureReading, 100, 880, 0, 100);
+  
   return pressure;
 }
 byte getWaterLevel() {
-  // Clears the trig Pin condition
-  // digitalWrite(WATER_LEVEL_TRIG_PIN_D, LOW);
-  // delayMicroseconds(2);
-  // // Sets the trig Pin HIGH (ACTIVE) for 10 microseconds
-  // digitalWrite(WATER_LEVEL_TRIG_PIN_D, HIGH);
-  // delayMicroseconds(10);
-  // digitalWrite(WATER_LEVEL_TRIG_PIN_D, LOW);
-  // // Reads the echo Pin, returns the sound wave travel time in microseconds
-  // unsigned long duration = pulseIn(WATER_LEVEL_ECHO_PIN_D, HIGH);
-  // // Calculating the distance
-  // int distance = duration * 0.0343 / 2; // Speed of sound wave divided by 2 (go and back) centimeters
-
   unsigned long distance = sonar.ping_cm();
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.println(" cm");
-  Serial.print("Tank is ");
-  Serial.print(map(distance, 18, MAX_DISTANCE, 100, 0));
-  Serial.println("% full");
   return map(distance, 18, MAX_DISTANCE, 100, 0);
 }
 

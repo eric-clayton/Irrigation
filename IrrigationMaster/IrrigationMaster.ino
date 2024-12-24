@@ -2,18 +2,19 @@
 #include <Wire.h>
 #include <LiquidCrystal_PCF8574.h>
 
-
-
 #define CURRENTPUMP 0
 #define PRESSURE 1
 #define WATERLEVEL 2
-#define FLOW 3
+#define DELTA_P 3
 #define PRIME_RAIN_FAIL 4
 #define PRIME_RAIN_FAIL_WATERLEVEL 5
 #define PRIME_WELL_FAILED 6
-#define RAIN_TIMER 7
+#define PRIME_WELL_FAIL_PRESSURE 7
 #define FILTER_TIMER 8
+#define RAIN_TIMER 9
+#define PRIME_TIMER 10
 
+const byte MAX_MESSAGES = 11;
 
 
 // Rain pump connected to digital pin 9
@@ -25,35 +26,37 @@ const byte LOW_PRESSURE = 20;
 // 40 PSI  
 const byte HIGH_PRESSURE = 40;
 
-const byte MIN_WATER_LEVEL_PERCENTAGE = 10;
-
-// if the water level is low or the flow was 0 do not retry for 3 hr 
-const unsigned long RAIN_REST_TIME = 10800000;
+const byte MIN_WATER_LEVEL_PERCENTAGE = 15;
+const byte NORMAL_WATER_LEVEL_PERCENTAGE = 50;
+const byte MAX_WATER_LEVEL_PERCENTAGE = 100;
+// if the water level is low or the delta p was low do not retry for 3 hr 
+const unsigned long RAIN_REST_TIME =  24 * 3600000;
 // 30 min will require a manual reset. 
 const unsigned long OVERRUN_TIME = 1800000; 
 // 24 hr
 const unsigned long FILTER_REST_TIME  = 86400000;
 // 5 seconds to flush
 const unsigned long FILTER_TIME = 5000;
-const unsigned long FLOW_TIME = 30000;
-const unsigned long PRIME_TIME = 60000;
+const unsigned long DELTA_P_TIME = 65000;
+const unsigned long PRIME_TIME = 50000;
 const unsigned long DISPLAY_TIME = 2000;
-const byte MAX_MESSAGES = 9;
+
 // set the LCD address to 0x27 for a 16 chars and 2 line display
 LiquidCrystal_PCF8574 lcd(0x27);  
 //LCD connections: SCL > A5,  SDA > A4
 //CAN BUS connections: CS > D10, SO > D12, SI > D11, SCK > D13,  INT > D2
 
 // Errors
-bool isFlowZero = false;
+bool isDeltaPLow = false;
 bool primeFailedWell = false;
-// Flow is zero but water level is above minimum
+byte pressurePrimeFailed = 255;
+// Delta p is low but water level is above minimum
 bool primeFailedRain = false;
 byte waterLevelPrimeFailed = 255;
 
 bool stopPumpMessageFlag = false;
 bool startPumpMessageFlag = false;
-bool flowZeroMessageFlag = false; 
+bool lowDeltaPMessageFlag = false; 
 bool startFilterMessageFlag = false;
 bool stopFilterMessageFlag = false;
 
@@ -62,11 +65,12 @@ byte currentPump = 255;
 byte shutDownPump = 255;
 byte pressure;
 byte waterLevelPercentage;
-short flow;
+short deltaP;
 
 short prevPressure = 255;
 byte messageIndex = 0;
 
+bool isRainRest = true;
 class Timer {
   unsigned long duration;
   unsigned long startTime;
@@ -84,13 +88,13 @@ class Timer {
     return active;
   }
   void start() {
-    if(active)
-    {
+    if (active) {
       return;
     }
     active = true;
-    if(onStart)
+    if (onStart) {
       onStart();
+    }
     startTime = millis();
   }
   void end() {
@@ -105,6 +109,9 @@ class Timer {
   double timeRemainingHr() {
     return ((double)timeRemaining() / 1000.0 / 60.0 / 60.0);
   }
+  double timeRemainingSec() {
+    return ((double)timeRemaining() / 1000.0);
+  }
   unsigned long timeRemaining() {
     unsigned long timeTotal = timeElapsed();
     if (timeTotal >= duration) {
@@ -115,8 +122,9 @@ class Timer {
     }
   }
   unsigned long timeElapsed() {
-    if (!isActive())
+    if (!active) {
       return 0;
+    }
     // unsigned long max value;
     const unsigned long MAX_ULONG = 0xFFFFFFFF;
     unsigned long currTime = millis();
@@ -130,8 +138,9 @@ class Timer {
     }
   }
   void update() {
-    if (active && timeElapsed() >= duration)
-      end();  
+    if (timeElapsed() >= duration) {
+      end();
+    }  
   }
   attachOnEnd(void (*callback)()) {
     onEnd = callback;
@@ -146,7 +155,7 @@ Timer rainRestTimer(RAIN_REST_TIME);
 Timer overrunTimer(OVERRUN_TIME);
 Timer messageTimer(DISPLAY_TIME);
 Timer interruptMessageTimer(DISPLAY_TIME);
-Timer flowTimer(FLOW_TIME);
+Timer deltaPTimer(DELTA_P_TIME);
 Timer filterActiveTimer(FILTER_TIME);
 Timer filterRestTimer(FILTER_REST_TIME);
 void setup() {
@@ -154,9 +163,10 @@ void setup() {
   // Attach timer functions
   overrunTimer.attachOnEnd(pumpOverran);
   primeTimer.attachOnEnd(primeFailed);
-  flowTimer.attachOnEnd(zeroFlow);
+  deltaPTimer.attachOnEnd(lowDeltaP);
   filterActiveTimer.attachOnStart(startFilterFlush);
   filterActiveTimer.attachOnEnd(endFilterFlush);
+  rainRestTimer.attachOnStart([&isRainRest]() {isRainRest = true;});
   lcd.begin(16, 2); // initialize the lcd
   delay(1000);
   lcd.setBacklight(255);
@@ -197,36 +207,40 @@ void loop() {
     displayMessage();
   }
   pressure = getPressure();
-
   waterLevelPercentage = getWaterLevelPercentage();
+  if (!rainRestTimer.isActive()) {
+    if (waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE || waterLevelPercentage > MAX_WATER_LEVEL_PERCENTAGE) {
+      isRainRest = true;
+      if (currentPump == RAIN_PUMP_PIN) {
+        shutDownPumps();
+      }
+    }
+    else if (waterLevelPercentage >= NORMAL_WATER_LEVEL_PERCENTAGE) {
+      isRainRest = false;
+    }
+  }
 
   // if pump on
   if (currentPump != 255) {
-    if(pressure > LOW_PRESSURE) {
+    if (pressure > LOW_PRESSURE) {
       primeTimer.cancel();
     }
-    if (pressure >= HIGH_PRESSURE || (currentPump == RAIN_PUMP_PIN && waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE)) {
+    else {
+      primeTimer.start();
+    }
+    if (pressure >= HIGH_PRESSURE) {
       shutDownPumps();
     }
   }
   // Pump is off. If pressure is low turn on pump  
   else if (pressure <= LOW_PRESSURE) {
-    if (!rainRestTimer.isActive()) {
-      // if water level is too low set rain rest to true
-      if (waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE) {
-        rainRestTimer.start();
-        if (!primeFailedWell) {
-          currentPump = WELL_PUMP_PIN;
-        } 
-      }
-      else {
-        currentPump = RAIN_PUMP_PIN;
-      }
+    if (!isRainRest) {
+      currentPump = RAIN_PUMP_PIN;
     }
     else if (!primeFailedWell) {
       currentPump = WELL_PUMP_PIN;
-    } 
-    if(currentPump != 255) {
+    }
+    if (currentPump != 255) {
       startPump();
     }
   }
@@ -240,20 +254,19 @@ void loop() {
   // failsafes if the pumps are still on
   if (currentPump != 255 || areAnyPumpsOn()) {
     byte currPressure = pressure;
-    flow = currPressure - prevPressure;
+    deltaP = currPressure - prevPressure;
     prevPressure = currPressure;
-    if(flow <= 0) {
-      flowTimer.start();
+    if (deltaP <= 0) {
+      deltaPTimer.start();
     }
     else {
-      flowTimer.cancel();
+      deltaPTimer.cancel();
     }
   }
   updateTimers();
-
 }
-void zeroFlow() { 
-  flowZeroMessageFlag = true;
+void lowDeltaP() { 
+  lowDeltaPMessageFlag = true;
   shutDownPumps();    
 }
 void primeFailed() {
@@ -264,6 +277,7 @@ void primeFailed() {
   }
   else if (currentPump == WELL_PUMP_PIN) {
     primeFailedWell = true;
+    pressurePrimeFailed  = pressure;
   }
   shutDownPumps();
 }
@@ -281,7 +295,7 @@ void updateTimers() {
   overrunTimer.update();
   messageTimer.update();
   interruptMessageTimer.update();
-  flowTimer.update();
+  deltaPTimer.update();
   filterActiveTimer.update();
   rainRestTimer.update();
   filterRestTimer.update();
@@ -332,12 +346,12 @@ byte waitForReading(const int id, void (*getReadingFailed)()) {
 void getPressureFailed() {
   shutDownPumps();
   printToLcd("Read timeout", "pressure");
-  while(1);
+  delay(5000);
 }
 void getWaterLevelFailed() {
   shutDownPumps();
   printToLcd("Read timeout", "water level");
-  while(1);
+  delay(5000);
 }
 void startFilterFlush() {
   const int FILTER_ID = 0x7;
@@ -374,6 +388,7 @@ void startPump() {
   }
   startPumpMessageFlag = true;
   digitalWrite(currentPump, LOW);
+  prevPressure = pressure;
   overrunTimer.start();
   primeTimer.start();
 }
@@ -383,7 +398,8 @@ void shutDownPumps() {
   digitalWrite(WELL_PUMP_PIN, HIGH);
   digitalWrite(RAIN_PUMP_PIN, HIGH);
   currentPump = 255;
-  flowTimer.cancel();
+  deltaP = 0;
+  deltaPTimer.cancel();
   overrunTimer.cancel();
   primeTimer.cancel();
 }
@@ -428,13 +444,13 @@ bool areAnyPumpsOn(){
   return wellPumpOn || rainPumpOn;
 }
 void displayInterruptMessage() {
-  if (interruptMessageTimer.isActive() || (!flowZeroMessageFlag && !stopPumpMessageFlag && !startPumpMessageFlag && !startFilterMessageFlag && !stopFilterMessageFlag)) {
+  if (interruptMessageTimer.isActive() || (!lowDeltaPMessageFlag && !stopPumpMessageFlag && !startPumpMessageFlag && !startFilterMessageFlag && !stopFilterMessageFlag)) {
     return;
   }
   else {
-    if (flowZeroMessageFlag) {
-      printToLcd("Flow is Zero", "");
-      flowZeroMessageFlag = false;
+    if (lowDeltaPMessageFlag) {
+      printToLcd("Delta P is low", "");
+      lowDeltaPMessageFlag = false;
     }
     else if (stopPumpMessageFlag) {
       printToLcd("Shut down: ", "");
@@ -474,8 +490,8 @@ void displayMessage() {
       case WATERLEVEL:
         displayWaterLevel();
         break;
-      case FLOW:
-        displayFlow();
+      case DELTA_P:
+        displayDeltaP();
         break;
       case PRIME_RAIN_FAIL:
         if (primeFailedRain)
@@ -495,6 +511,12 @@ void displayMessage() {
         else
           skipMessage = true;
         break;
+      case PRIME_WELL_FAIL_PRESSURE:
+        if (primeFailedWell)
+          displayPrimeWellFailPressure();
+        else
+          skipMessage = true;
+        break;
       case RAIN_TIMER:
         if (rainRestTimer.isActive())
           displayRainTimer();
@@ -507,6 +529,13 @@ void displayMessage() {
         else
           skipMessage = true;
         break;
+      case PRIME_TIMER:
+        if (primeTimer.isActive()){
+          displayPrimeTimer();
+        }
+        else {
+          skipMessage = true;
+        }
     }
     messageIndex++;
     if (messageIndex >= MAX_MESSAGES)
@@ -516,34 +545,37 @@ void displayMessage() {
 }
 
 void displayCurrentPump() {
-    printToLcd("Current pump: ", "");
-    printPump(currentPump);
+  printToLcd("Current pump: ", "");
+  printPump(currentPump);
 }
 
 void displayPressure() {
-    printToLcd("Pressure: ", pressure);
+  printToLcd("Pressure: ", pressure);
 }
 
 void displayWaterLevel() {
-    printToLcd("Water Tank: ", "");
-    lcd.print(waterLevelPercentage);
-    lcd.print("% full");
+  printToLcd("Water Tank: ", "");
+  lcd.print(waterLevelPercentage);
+  lcd.print("% full");
 }
 
-void displayFlow() {
-    printToLcd("Flow: ", flow);
+void displayDeltaP() {
+  printToLcd("DeltaP: ", deltaP);
 }
 
 void displayPrimeRainFail() {
-    printToLcd("Prime fail", "rain pump");
+  printToLcd("Prime fail", "rain pump");
 }
 
 void displayPrimeRainFailWaterLevel() {
-    printToLcd("at water %", waterLevelPrimeFailed);
+  printToLcd("at water %", waterLevelPrimeFailed);
 }
 
 void displayPrimeWellFailed() {
-    printToLcd("Prime fail", "well pump");
+  printToLcd("Prime fail", "well pump");
+}
+void displayPrimeWellFailPressure() {
+  printToLcd("at pressure", pressurePrimeFailed);
 }
 
 void displayRainTimer() {
@@ -557,6 +589,11 @@ void displayFilterTimer() {
     lcd.print(filterRestTimer.timeRemainingHr());
     lcd.print(" hr");
 }
+void displayPrimeTimer() {
+    printToLcd("Prime time", "t: ");
+    lcd.print(primeTimer.timeRemainingSec());
+    lcd.print(" s");
+}
 
 bool updateSkipMessage(bool shouldSkip, bool &skipMessage) {
   if(shouldSkip) {
@@ -565,79 +602,7 @@ bool updateSkipMessage(bool shouldSkip, bool &skipMessage) {
   }
   return false;
 }
-    
-// bool timer(byte x, unsigned long ms, char mode[13]){
-//   byte sc;
-//   if (mode == "Astable") {sc = 0;}
-//   if (mode == "Monostable") {sc = 1;}
-//   if (mode == "resetMSTimer") {sc = 2;}
-//   if (TimeMark[x] == 0) TimeMark[x] = millis();
-//   TimeElaps[x] = millis() - TimeMark[x];
-//     switch (sc){
-//       case 0:  //Astable
-//         if (TimeElaps[x] < ms){ //time is up//timeout = true;
-//           return true;
-//         }
-//         else if(TimeElaps[x] < ms*2){
-//           return false;
-//         }
-//          else{ 
-//           TimeMark[x] = millis();
-//         }
-//         break;
-//       case 1:  //Monostable
-//         if (TimeElaps[x] >= ms){ //time is up//timeout = true;
-//           TimeElaps[x] = 0;
-//           TimeMark[x] = 0;//reset
-//           return true;
-//         }
-//         else
-//         {
-//           return false;
-//         }
-//       break;
-//       case 2:  //resetMSTimer
-//         TimeMark[x] = 0;
-//         TimeElaps[x] = 0;
-//         return false;
-//         break;   
-//     }   
-// } 
-  
-// byte MaintainPressure(byte pump, char pumpname[]){
-//   byte Perrorlev; //0 = pres low, 1 = pres hi, 2 = prim fail, 3 = exced runtme, 4 = leak
 
-//   do {
-//     byte Readp = getPressure();
-//     delay(100);
-//     if (Readp <= LOW_PRESSURE) {
-//       digitalWrite(pump, LOW);   // running pump
-//       if (timer(2, PRIME_TIME, "Monostable")){
-//         // Prime pump time delay
-//         Perrorlev = 2;
-//         digitalWrite(pump, HIGH);   // stop pump
-//       }
-//       else {
-//         Perrorlev = 0;
-//       }
-//     }
-//     // Max pressure
-//     else if (Readp >= HIGH_PRESSURE){
-//       timer(2, 0, "resetMSTimer");
-//       timer(3, 0, "resetMSTimer");
-//       digitalWrite(pump, HIGH);   // stop pump
-//       Perrorlev = 1;
-//       if (timer(7, FILTER_FLUSH_TIME, "Monostable")) filterflush();
-//     }
-//     // Pressure normal
-//     else {
-//       if (timer(3, OVERRUN_TIME, "Monostable")) Perrorlev = 3;
-//       timer(2, 0, "resetMSTimer");
-//     }
-//     } while (Perrorlev < 2);
-//   return Perrorlev;
-// }
-// return true if filter is done flushing
 
 
 
