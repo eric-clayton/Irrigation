@@ -21,6 +21,7 @@ const byte MAX_MESSAGES = 11;
 const byte RAIN_PUMP_PIN = 9;
 // Well pump connected to digital pin 4       
 const byte WELL_PUMP_PIN = 4; 
+const byte SPRINKLER_PIN = 5;
 // 20 PSI
 const byte LOW_PRESSURE = 20;
 // 40 PSI  
@@ -37,8 +38,8 @@ const unsigned long OVERRUN_TIME = 1800000;
 const unsigned long FILTER_REST_TIME  = 86400000;
 // 5 seconds to flush
 const unsigned long FILTER_TIME = 5000;
-const unsigned long DELTA_P_TIME = 65000;
-const unsigned long PRIME_TIME = 50000;
+const unsigned long DELTA_P_TIME = 100000;
+const unsigned long PRIME_TIME = 80000;
 const unsigned long DISPLAY_TIME = 2000;
 
 // set the LCD address to 0x27 for a 16 chars and 2 line display
@@ -209,7 +210,7 @@ void loop() {
   pressure = getPressure();
   waterLevelPercentage = getWaterLevelPercentage();
   if (!rainRestTimer.isActive()) {
-    if (waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE || waterLevelPercentage > MAX_WATER_LEVEL_PERCENTAGE) {
+    if (waterLevelPercentage < MIN_WATER_LEVEL_PERCENTAGE || waterLevelPercentage >= MAX_WATER_LEVEL_PERCENTAGE) {
       isRainRest = true;
       if (currentPump == RAIN_PUMP_PIN) {
         shutDownPumps();
@@ -224,6 +225,9 @@ void loop() {
   if (currentPump != 255) {
     if (pressure > LOW_PRESSURE) {
       primeTimer.cancel();
+      if (!filterRestTimer.isActive()) {
+        filterActiveTimer.start();
+      }
     }
     else {
       primeTimer.start();
@@ -244,13 +248,6 @@ void loop() {
       startPump();
     }
   }
-  // Pump is off. If filter flush is not resting start flushing
-  else {
-    // if rest is over start flush
-    if (!filterRestTimer.isActive()) {
-      filterActiveTimer.start();
-    }
-  }
   // failsafes if the pumps are still on
   if (currentPump != 255 || areAnyPumpsOn()) {
     byte currPressure = pressure;
@@ -261,6 +258,10 @@ void loop() {
     }
     else {
       deltaPTimer.cancel();
+    }
+    if (digitalRead(SPRINKLER_PIN) == HIGH)
+    {
+      overrunTimer.start();
     }
   }
   updateTimers();
@@ -282,8 +283,14 @@ void primeFailed() {
   shutDownPumps();
 }
 void pumpOverran() {
+  // if the sprinklers are on cancel shutdown
+  if (digitalRead(SPRINKLER_PIN) == LOW)
+  {
+    overrunTimer.cancel();
+    return;
+  }
   // num of hours times length of hour in ms (24 hours)
-  const unsigned long REST_TIME = (3.6e+6 * 24);
+  const unsigned long REST_TIME = (3.6e+6 * 12);
   printToLcd("Overran", "");
   printPump(currentPump);
   shutDownPumps();
@@ -381,15 +388,9 @@ byte CANreceive(int id) {
   return 255;
 }
 void startPump() {
-    // if the filter is flushing turn it off before turning on the pump
-  if (filterActiveTimer.isActive()) {
-    delay(1000);
-    filterActiveTimer.end();
-  }
   startPumpMessageFlag = true;
   digitalWrite(currentPump, LOW);
   prevPressure = pressure;
-  overrunTimer.start();
   primeTimer.start();
 }
 void shutDownPumps() {
