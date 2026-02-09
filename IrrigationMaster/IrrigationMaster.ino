@@ -78,6 +78,7 @@ class Timer {
   bool active = false;
   void (*onEnd)() = nullptr;
   void (*onStart)() = nullptr;
+  void (*onUpdate)() = nullptr;
   public:
   Timer(unsigned long duration) {
     this->duration = duration;
@@ -139,8 +140,15 @@ class Timer {
     }
   }
   void update() {
+    if (!active) {
+      return;
+    }
     if (timeElapsed() >= duration) {
       end();
+    }
+    else if (onUpdate)
+    {
+      onUpdate();
     }  
   }
   attachOnEnd(void (*callback)()) {
@@ -148,6 +156,10 @@ class Timer {
   }
   attachOnStart(void (*callback)()) {
     onStart = callback;
+  }
+  attachOnUpdate(void (*callback)())
+  {
+    onUpdate = callback;
   }
 };
 // Setup timers
@@ -165,8 +177,9 @@ void setup() {
   overrunTimer.attachOnEnd(pumpOverran);
   primeTimer.attachOnEnd(primeFailed);
   deltaPTimer.attachOnEnd(lowDeltaP);
-  filterActiveTimer.attachOnStart(startFilterFlush);
-  filterActiveTimer.attachOnEnd(endFilterFlush);
+  filterActiveTimer.attachOnStart(activateFilterFlush);
+  filterActiveTimer.attachOnUpdate(activateFilterFlush);
+  filterActiveTimer.attachOnEnd(deactivateFilterFlush);
   rainRestTimer.attachOnStart([&isRainRest]() {isRainRest = true;});
   lcd.begin(16, 2); // initialize the lcd
   delay(1000);
@@ -360,15 +373,15 @@ void getWaterLevelFailed() {
   printToLcd("Read timeout", "water level");
   delay(5000);
 }
-void startFilterFlush() {
+void activateFilterFlush() {
   const int FILTER_ID = 0x7;
   startFilterMessageFlag = true;
-  CANsend(FILTER_ID, 0);
+  CANsend(FILTER_ID, 1);
 }
-void endFilterFlush() {
+void deactivateFilterFlush() {
   const int FILTER_ID = 0x7;
   stopFilterMessageFlag = true;
-  CANsend(FILTER_ID, 1);
+  CANsend(FILTER_ID, 0);
   filterRestTimer.start();
 }
 void CANsend(int id, byte val){

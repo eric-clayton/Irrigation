@@ -28,6 +28,7 @@ const byte COM_ERROR_PIN_D = 5;
 const byte FILTER_RELAY_PIN_D = 6;
 NewPing sonar(WATER_LEVEL_TRIG_PIN_D, WATER_LEVEL_ECHO_PIN_D, MAX_DISTANCE);
 void setup() {
+  Serial.begin(9600);
   // Connect can communication error as output
   pinMode(COM_ERROR_PIN_D, OUTPUT);
   // Connect filter relay as output
@@ -53,7 +54,9 @@ void setup() {
 void loop() {
   CANsend(PRESSURE_ID, getPressure());
   CANsend(WATER_LEVEL_ID, getWaterLevel());
-  if (CANreceive(FILTER_ID) == 1) {
+  long filterResponse = CANreceive(FILTER_ID);
+
+  if (filterResponse == 1) {
     digitalWrite(FILTER_RELAY_PIN_D, LOW);
   }
   else {
@@ -80,6 +83,10 @@ byte getPressure(){
 }
 byte getWaterLevel() {
   unsigned long distance = sonar.ping_cm();
+  if (distance <= 5)
+  {
+    return 0;
+  }
   return map(distance, 18, MAX_DISTANCE, 100, 0);
 }
 
