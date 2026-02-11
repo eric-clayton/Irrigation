@@ -125,6 +125,6 @@ The system uses a lightweight CAN messaging structure optimized for low-bandwidt
 
 ## 👤 Author
 
-**[Your Name]**
+**Eric Clayton**
 
 **Focus Areas:** Embedded Systems · Industrial Automation · IoT
